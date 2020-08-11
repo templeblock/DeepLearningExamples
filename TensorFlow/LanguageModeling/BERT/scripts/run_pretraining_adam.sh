@@ -15,10 +15,10 @@
 
 echo "Container nvidia build = " $NVIDIA_BUILD_ID
 
-train_batch_size=${1:-14}
+train_batch_size=${1:-16}
 eval_batch_size=${2:-8}
 learning_rate=${3:-"1e-4"}
-precision=${4:-"manual_fp16"}
+precision=${4:-"fp16"}
 use_xla=${5:-"true"}
 num_gpus=${6:-8}
 warmup_steps=${7:-"10000"}
@@ -39,11 +39,13 @@ fi
 
 PREC=""
 if [ "$precision" = "fp16" ] ; then
-   PREC="--use_fp16"
+   PREC="--amp"
 elif [ "$precision" = "fp32" ] ; then
-   PREC=""
+   PREC="--noamp"
+elif [ "$precision" = "tf32" ] ; then
+   PREC="--noamp"
 elif [ "$precision" = "manual_fp16" ] ; then
-   PREC="--manual_fp16"
+   PREC="--noamp --manual_fp16"
 else
    echo "Unknown <precision> argument"
    exit -2
@@ -52,6 +54,8 @@ fi
 if [ "$use_xla" = "true" ] ; then
     PREC="$PREC --use_xla"
     echo "XLA activated"
+else
+    PREC="$PREC --nouse_xla"
 fi
 
 export GBS=$(expr $train_batch_size \* $num_gpus \* $num_accumulation_steps)
@@ -68,7 +72,14 @@ printf "Logs written to %s\n" "$LOGFILE"
 INPUT_FILES="$DATA_DIR/training"
 EVAL_FILES="$DATA_DIR/test"
 
-CMD="python3 /workspace/bert/run_pretraining.py"
+horovod_str=""
+mpi=""
+if [ $num_gpus -gt 1 ] ; then
+   mpi="mpiexec --allow-run-as-root -np $num_gpus --bind-to socket"
+   horovod_str="--horovod"
+fi
+
+CMD="$mpi python3 /workspace/bert/run_pretraining.py"
 CMD+=" --input_files_dir=$INPUT_FILES"
 CMD+=" --eval_files_dir=$EVAL_FILES"
 CMD+=" --output_dir=$RESULTS_DIR"
@@ -85,7 +96,7 @@ CMD+=" --num_accumulation_steps=$num_accumulation_steps"
 CMD+=" --save_checkpoints_steps=$save_checkpoints_steps"
 CMD+=" --learning_rate=$learning_rate"
 CMD+=" --optimizer_type=adam"
-CMD+=" --horovod $PREC"
+CMD+=" $horovod_str $PREC"
 CMD+=" --allreduce_post_accumulation=True"
 
 #Check if all necessary files are available before training
@@ -95,10 +106,6 @@ for DIR_or_file in $DATA_DIR $BERT_CONFIG $RESULTS_DIR; do
      exit -1
   fi
 done
-
-if [ $num_gpus -gt 1 ] ; then
-   CMD="mpiexec --allow-run-as-root -np $num_gpus --bind-to socket $CMD"
-fi
 
 set -x
 if [ -z "$LOGFILE" ] ; then
